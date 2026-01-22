@@ -96,7 +96,9 @@ JupyterLabが起動している場合は、ターミナルで Control + C を押
 
 以下のコマンドを実行します 。
 
+```bash
 pip install jupyterlab jupyterlab-language-pack-ja-JP
+```
 
 再度 jupyter lab コマンドで起動します 。
 
