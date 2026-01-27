@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>倒立振子（KF + グラフ修正版）</title>
+<script src="https://cdn.jsdelivr.net/npm/p5@1.6.0/lib/p5.min.js"></script>
+<style>
+body { font-family: sans-serif; text-align: center; margin: 0; padding-top: 5px; }
+#controls {
+margin: 5px auto;
+display: flex;
+justify-content: center;
+align-items: flex-start;
+flex-wrap: wrap;
+gap: 10px;
+max-width: 980px;
+}
+
+.control-group {
+border: 1px solid #ccc;
+padding: 6px 10px;
+border-radius: 4px;
+display: flex;
+flex-direction: column;
+gap: 4px;
+background-color: #fff;
+min-width: 110px;
+}
+
+.control-group strong {
+font-size: 0.85rem;
+margin-bottom: 2px;
+border-bottom: 1px solid #eee;
+padding-bottom: 2px;
+text-align: center;
+display: block;
+}
+
+.input-pair {
+display: flex;
+justify-content: space-between;
+align-items: center;
+width: 100%;
+}
+
+.input-pair label {
+font-size: 0.8rem;
+margin-right: 5px;
+white-space: nowrap;
+}
+
+input {
+width: 55px;
+padding: 2px;
+font-size: 0.85rem;
+border: 1px solid #999;
+border-radius: 2px;
+text-align: right;
+}
+
+h3 { margin: 5px 0; font-size: 1.2rem; }
+
+.button-container {
+display: flex;
+align-items: center;
+height: 100%;
+padding-top: 30px;
+}
+button {
+padding: 8px 16px;
+cursor: pointer;
+font-size: 0.85rem;
+background-color: #e0f7fa;
+border: 1px solid #00acc1;
+border-radius: 3px;
+color: #006064;
+}
+button:hover {
+background-color: #b2ebf2;
+}
+
+/* 凡例のスタイル */
+.legend-box {
+  display: flex; justify-content: center; gap: 20px; margin: 10px auto 5px;
+  font-size: 0.9rem; font-family: monospace;
+}
+.legend-item { display: flex; align-items: center; }
+.legend-color { width: 12px; height: 12px; margin-right: 5px; display: inline-block; }
+
+#info-box {
+width: 900px; margin: 5px auto 10px; padding: 10px;
+border: 1px solid #888; background: #f9f9f9;
+text-align: left; font-family: monospace; font-size: 0.9rem;
+}
+canvas { display: block; margin: 5px auto; border: 1px solid #ccc; }
+</style>
+</head>
+
+<body>
+<div id="controls">
+    <div class="control-group">
+        <strong>Gain (F)</strong>
+        <div class="input-pair"><label>F1(x)</label><input type="number" id="k1" value="1.0" step="0.1" /></div>
+        <div class="input-pair"><label>F2(ẋ)</label><input type="number" id="k2" value="3.96" step="0.1" /></div>
+        <div class="input-pair"><label>F3(θ)</label><input type="number" id="k3" value="-38.8" step="0.1" /></div>
+        <div class="input-pair"><label>F4(θ̇)</label><input type="number" id="k4" value="-9.11" step="0.1" /></div>
+    </div>
+
+    <div class="control-group" style="background-color: #fff0f0;">
+        <strong>Real Noise (σ)</strong>
+        <div class="input-pair"><label>Noise x</label><input type="number" id="noise_white1" value="0.05" step="0.005" /></div>
+        <div class="input-pair"><label>Noise θ</label><input type="number" id="noise_white2" value="0.05" step="0.005" /></div>
+    </div>
+
+    <div class="control-group" style="background-color: #f0fff4;">
+        <strong>KF Tuning (Q)</strong>
+        <div class="input-pair"><label>Q_pos</label><input type="number" id="q_pos" value="0.01" step="0.001" /></div>
+        <div class="input-pair"><label>Q_angle</label><input type="number" id="q_angle" value="0.001" step="0.001" /></div>
+    </div>
+
+    <div class="control-group" style="background-color: #e6f7ff;">
+        <strong>KF Tuning (R)</strong>
+        <div class="input-pair"><label>R_pos(σ)</label><input type="number" id="r_pos_param" value="0.0025" step="0.0001" /></div>
+        <div class="input-pair"><label>R_ang(σ)</label><input type="number" id="r_angle_param" value="0.0025" step="0.0001" /></div>
+    </div>
+
+    <div class="button-container">
+        <button onclick="resetSystem()">リセット</button>
+    </div>
+</div>
+
+<div class="legend-box">
+    <div class="legend-item"><span class="legend-color" style="background: #00aa00;"></span>真値 (True State)</div>
+    <div class="legend-item"><span class="legend-color" style="background: #ff9900; opacity: 0.6;"></span>観測値 (Noisy Sensor)</div>
+    <div class="legend-item"><span class="legend-color" style="background: #0000ff;"></span>推定値 (Kalman Filter)</div>
+</div>
+
+<!-- <div id="info-box"><pre id="info">Loading...</pre></div> -->
+
+<script>
+class SimpleKalmanFilter {
+    constructor(initialVal, initialVel = 0) {
+        this.x = initialVal; 
+        this.v = initialVel;
+        this.p11 = 1.0; this.p12 = 0.0;
+        this.p21 = 0.0; this.p22 = 1.0;
+    }
+    predict(dt, q_scale) {
+        const x_pred = this.x + this.v * dt;
+        const v_pred = this.v;
+        const q_pos = q_scale; 
+        const q_vel = q_scale; 
+        const p11_new = this.p11 + dt * this.p21 + dt * (this.p12 + dt * this.p22) + q_pos;
+        const p12_new = this.p12 + dt * this.p22;
+        const p21_new = this.p21 + dt * this.p22;
+        const p22_new = this.p22 + q_vel;
+        this.x = x_pred;
+        this.v = v_pred;
+        this.p11 = p11_new; this.p12 = p12_new;
+        this.p21 = p21_new; this.p22 = p22_new;
+    }
+    update(measurement, r_noise_std) {
+        const y = measurement - this.x;
+        const R = r_noise_std * r_noise_std;
+        const S = this.p11 + R;
+        const K1 = this.p11 / S; 
+        const K2 = this.p21 / S; 
+        this.x = this.x + K1 * y;
+        this.v = this.v + K2 * y;
+        const p11_upd = (1 - K1) * this.p11;
+        const p12_upd = (1 - K1) * this.p12;
+        const p21_upd = -K2 * this.p11 + this.p21;
+        const p22_upd = -K2 * this.p12 + this.p22;
+        this.p11 = p11_upd; this.p12 = p12_upd;
+        this.p21 = p21_upd; this.p22 = p22_upd;
+    }
+    getEstimate() {
+        return { pos: this.x, vel: this.v };
+    }
+}
+
+let x, x_dot, theta, theta_dot, u;
+let x_observed = 0;
+let theta_observed = 0;
+let x_est = 0;
+let x_dot_est = 0;
+let theta_est = 0;
+let theta_dot_est = 0;
+let kfX, kfTheta;
+let noise_val_x = 0;
+let noise_val_theta = 0;
+let lastSimTime = 0;
+
+// 履歴用配列（真値、観測値、推定値）
+let xHistory = [], xObsHistory = [], xEstHistory = [];
+let xDotHistory = [], xDotEstHistory = [];
+let thetaHistory = [], thetaObsHistory = [], thetaEstHistory = [];
+let thetaDotHistory = [], thetaDotEstHistory = [];
+
+const MAX_HISTORY = 1000;
+const g = 9.8;
+const fps = 60;
+const dt = 0.005;
+const M = 1.0;
+const m = 0.1;
+const l = 1.0;
+const damping_x = 0.3;
+const damping_theta = 0.2;
+const px2m = 1.0 / 100;
+
+function setup() {
+    createCanvas(1000, 730);
+    frameRate(fps);
+    resetSystem();
+    textFont('monospace', 14);
+}
+
+function draw() {
+    background(255);
+    const now = millis() / 1000;
+    while (lastSimTime + dt <= now) {
+        simulate(dt);
+        lastSimTime += dt;
+    }
+    drawGraphs();
+    drawCart();
+    updateInfo();
+}
+
+function simulate(dt) {
+    const k1 = parseFloat(document.getElementById("k1").value);
+    const k2 = parseFloat(document.getElementById("k2").value);
+    const k3 = parseFloat(document.getElementById("k3").value);
+    const k4 = parseFloat(document.getElementById("k4").value);
+    const current_noise_std_x = parseFloat(document.getElementById("noise_white1").value);
+    const current_noise_std_theta = parseFloat(document.getElementById("noise_white2").value);
+    const q_pos_val = parseFloat(document.getElementById("q_pos").value);
+    const q_angle_val = parseFloat(document.getElementById("q_angle").value);
+    const r_pos_param = parseFloat(document.getElementById("r_pos_param").value);
+    const r_angle_param = parseFloat(document.getElementById("r_angle_param").value);
+
+    const x_m = (x - width/2) * px2m;
+    noise_val_x = randomGaussian(0, current_noise_std_x);
+    noise_val_theta = randomGaussian(0, current_noise_std_theta);
+    x_observed = x_m + noise_val_x;
+    theta_observed = theta + noise_val_theta;
+
+    // KF予測・更新
+    kfX.predict(dt, q_pos_val);
+    kfTheta.predict(dt, q_angle_val);
+    kfX.update(x_observed, r_pos_param);
+    kfTheta.update(theta_observed, r_angle_param);
+
+    const estX = kfX.getEstimate();
+    const estTheta = kfTheta.getEstimate();
+    x_est = estX.pos;
+    x_dot_est = estX.vel;
+    theta_est = estTheta.pos;
+    theta_dot_est = estTheta.vel;
+
+    // 制御入力（推定値を使用）
+    u = - (k1 * x_est + k2 * x_dot_est + k3 * theta_est + k4 * theta_dot_est);
+
+    // 物理シミュレーション
+    const sinT = Math.sin(theta);
+    const cosT = Math.cos(theta);
+    const totalMass = M + m;
+    const theta_ddot = (g * sinT - cosT * (u + m * l * theta_dot ** 2 * sinT) / totalMass) / (l * (1 - m * cosT * cosT / totalMass)) - damping_theta * theta_dot;
+    const x_ddot = (u + m * l * (theta_dot ** 2 * sinT - theta_ddot * cosT)) / totalMass - damping_x * x_dot;
+
+    x_dot += x_ddot * dt;
+    x += x_dot * dt;
+    theta_dot += theta_ddot * dt;
+    theta += theta_dot * dt;
+    x = constrain(x, 50, width - 50);
+
+    // 履歴保存
+    xHistory.push(x_m);
+    xObsHistory.push(x_observed);
+    xEstHistory.push(x_est);
+
+    xDotHistory.push(x_dot); // True
+    xDotEstHistory.push(x_dot_est);
+
+    thetaHistory.push(theta);
+    thetaObsHistory.push(theta_observed);
+    thetaEstHistory.push(theta_est);
+
+    thetaDotHistory.push(theta_dot); // True
+    thetaDotEstHistory.push(theta_dot_est);
+
+    if (thetaHistory.length > MAX_HISTORY) {
+        xHistory.shift(); xObsHistory.shift(); xEstHistory.shift();
+        xDotHistory.shift(); xDotEstHistory.shift();
+        thetaHistory.shift(); thetaObsHistory.shift(); thetaEstHistory.shift();
+        thetaDotHistory.shift(); thetaDotEstHistory.shift();
+    }
+}
+
+function drawCart() {
+    const cartY = height - 150;
+    stroke(200);
+    strokeWeight(1);
+    line(0, cartY + 35, width, cartY + 35);
+    fill(100, 180, 255);
+    stroke(0);
+    strokeWeight(1);
+    rectMode(CENTER);
+    rect(x, cartY, 100, 30, 10);
+    fill(0);
+    ellipse(x - 30, cartY + 25, 20, 20);
+    ellipse(x + 30, cartY + 25, 20, 20);
+    const l_px = l * 100;
+    const pendulumX = x - l_px * Math.sin(theta);
+    const pendulumY = cartY - l_px * Math.cos(theta);
+    stroke(0);
+    strokeWeight(6);
+    line(x, cartY, pendulumX, pendulumY);
+    fill(0);
+    ellipse(pendulumX, pendulumY, 20, 20);
+    
+    // 観測値の可視化（赤丸）
+    fill(255, 0, 0, 100);
+    noStroke();
+    const x_obs_px = width/2 + x_observed / px2m;
+    ellipse(x_obs_px, cartY, 10, 10);
+    const pen_obsX = x - l_px * Math.sin(theta_observed);
+    const pen_obsY = cartY - l_px * Math.cos(theta_observed);
+    ellipse(pen_obsX, pen_obsY, 10, 10);
+    rectMode(CORNER);
+}
+
+function resetSystem() {
+    x = width / 2;
+    x_dot = 0;
+    theta = 0.1;
+    theta_dot = 0;
+    lastSimTime = millis() / 1000;
+    x_observed = 0;
+    theta_observed = 0.1;
+    kfX = new SimpleKalmanFilter(0, 0);
+    kfTheta = new SimpleKalmanFilter(0.1, 0);
+    
+    // 履歴リセット
+    xHistory = []; xObsHistory = []; xEstHistory = [];
+    xDotHistory = []; xDotEstHistory = [];
+    thetaHistory = []; thetaObsHistory = []; thetaEstHistory = [];
+    thetaDotHistory = []; thetaDotEstHistory = [];
+}
+
+function updateInfo() {
+    const x_m = (x - width/2) * px2m;
+    // document.getElementById("info").textContent =
+    //     `-- True State --\n` +
+    //     `θ : ${theta.toFixed(4)} rad, x : ${x_m.toFixed(4)} m\n\n` +
+    //     `-- Observed --\n` +
+    //     `x_obs : ${x_observed.toFixed(4)} m\n` +
+    //     `θ_obs : ${theta_observed.toFixed(4)} rad\n\n` +
+    //     `-- Kalman Est --\n` +
+    //     `θ_est : ${theta_est.toFixed(4)} rad\n` +
+    //     `θ̇_est : ${theta_dot_est.toFixed(4)} rad/s\n` +
+    //     `x_est : ${x_est.toFixed(4)} m\n` +
+    //     `ẋ_est : ${x_dot_est.toFixed(4)} m/s\n\n` +
+    //     `u : ${u.toFixed(3)} N`;
+}
+
+// ★★★ グラフ描画関数（配置変更・多重描画版） ★★★
+function drawGraphs() {
+    const gW = 450;
+    const gH = 100;
+    const gX1 = 45;  // 左側X座標
+    const gX2 = 545; // 右側X座標
+    const gY1 = 10;  // 上段Y座標
+    const gY2 = 120; // 下段Y座標
+
+    // ==========================================
+    // 上段: カート系 (Position, Velocity)
+    // ==========================================
+
+    // 左上: カート位置 (x)
+    plotGraphShell(gX1, gY1, gW, gH, "Cart Position (x) [m]", -5.0, 5.0, true);
+    plotGraphData(gX1, gY1, gW, gH, xObsHistory, -5.0, 5.0, color(255, 150, 0, 100), 1); // Noisy (Orange)
+    plotGraphData(gX1, gY1, gW, gH, xEstHistory, -5.0, 5.0, color(0, 0, 255), 2);        // Est (Blue)
+    plotGraphData(gX1, gY1, gW, gH, xHistory, -5.0, 5.0, color(0, 150, 0), 2);           // True (Green)
+
+    // 右上: カート速度 (x_dot)
+    // ※速度には観測ノイズを直接プロットしない（KFの推定と真値の比較）
+    plotGraphShell(gX2, gY1, gW, gH, "Cart Velocity (x_dot) [m/s]", -5.0, 5.0, true);
+    plotGraphData(gX2, gY1, gW, gH, xDotEstHistory, -5.0, 5.0, color(0, 0, 255), 2);     // Est (Blue)
+    plotGraphData(gX2, gY1, gW, gH, xDotHistory, -5.0, 5.0, color(0, 150, 0), 2);        // True (Green)
+
+    // ==========================================
+    // 下段: 振子系 (Angle, Ang. Velocity)
+    // ==========================================
+
+    // 左下: 角度 (theta)
+    plotGraphShell(gX1, gY2, gW, gH, "Angle (theta) [rad]", -5.0, 5.0, true);
+    plotGraphData(gX1, gY2, gW, gH, thetaObsHistory, -5.0, 5.0, color(255, 150, 0, 100), 1); // Noisy (Orange)
+    plotGraphData(gX1, gY2, gW, gH, thetaEstHistory, -5.0, 5.0, color(0, 0, 255), 2);        // Est (Blue)
+    plotGraphData(gX1, gY2, gW, gH, thetaHistory, -5.0, 5.0, color(0, 150, 0), 2);           // True (Green)
+
+    // 右下: 角速度 (theta_dot)
+    plotGraphShell(gX2, gY2, gW, gH, "Angular Velocity (theta_dot) [rad/s]", -5.0, 5.0, true);
+    plotGraphData(gX2, gY2, gW, gH, thetaDotEstHistory, -5.0, 5.0, color(0, 0, 255), 2);     // Est (Blue)
+    plotGraphData(gX2, gY2, gW, gH, thetaDotHistory, -5.0, 5.0, color(0, 150, 0), 2);        // True (Green)
+}
+
+function plotGraphShell(x, y, w, h, title, yMin, yMax, zeroLine) {
+    push(); translate(x, y);
+    stroke(200); fill(250); rect(0, 0, w, h);
+
+    // 目盛り
+    const steps = 4;
+    textSize(10); textAlign(RIGHT, CENTER); noStroke(); fill(80);
+    for (let i = 0; i <= steps; i++) {
+        let val = lerp(yMax, yMin, i / steps);
+        let yPos = map(val, yMin, yMax, h, 0);
+        stroke(230); strokeWeight(1);
+        if (i === 0 || i === steps) stroke(200);
+        line(0, yPos, w, yPos);
+        noStroke();
+        text(val.toFixed(1), -5, yPos);
+    }
+
+    fill(0); noStroke(); textAlign(LEFT, TOP); textSize(12); text(title, 5, 5);
+    if (zeroLine) {
+        stroke(200, 100, 100, 150); strokeWeight(1);
+        const yZero = map(0, yMin, yMax, h, 0);
+        if (yZero >= 0 && yZero <= h) line(0, yZero, w, yZero);
+    }
+    pop();
+}
+
+function plotGraphData(x, y, w, h, data, yMin, yMax, c, weight) {
+    push(); translate(x, y);
+    drawingContext.save();
+    drawingContext.beginPath();
+    drawingContext.rect(0, 0, w, h);
+    drawingContext.clip();
+
+    stroke(c); strokeWeight(weight); noFill();
+    beginShape();
+    for (let i = 0; i < data.length; i++) {
+        const xPixel = map(i, 0, MAX_HISTORY - 1, 0, w);
+        const yPixel = map(data[i], yMin, yMax, h, 0);
+        vertex(xPixel, yPixel);
+    }
+    endShape();
+    drawingContext.restore();
+    pop();
+}
+</script>
+</body>
+</html>

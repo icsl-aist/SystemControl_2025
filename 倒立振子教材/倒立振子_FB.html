@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>倒立振子（状態フィードバック制御版） - 目盛り付き</title>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.6.0/lib/p5.min.js"></script>
+  <style>
+    body { font-family: sans-serif; text-align: center; margin: 0; padding-top: 5px; }
+    
+    /* 全体のレイアウト */
+    #controls { 
+      margin: 5px auto; 
+      display: flex; 
+      justify-content: center; 
+      align-items: flex-start;
+      flex-wrap: wrap; 
+      gap: 10px; 
+      max-width: 980px; 
+    }
+
+    .control-group { 
+      border: 1px solid #ccc; 
+      padding: 6px 10px; 
+      border-radius: 4px; 
+      display: flex; 
+      flex-direction: column; 
+      gap: 4px; 
+      background-color: #fff;
+      min-width: 110px; 
+    }
+
+    .control-group strong {
+      font-size: 0.85rem;
+      margin-bottom: 2px;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 2px;
+      text-align: center;
+      display: block;
+    }
+
+    .input-pair {
+      display: flex;
+      justify-content: space-between; 
+      align-items: center;
+      width: 100%;
+    }
+
+    .input-pair label { 
+      font-size: 0.8rem; 
+      margin-right: 5px; 
+      white-space: nowrap;
+    }
+
+    input { 
+      width: 50px; 
+      padding: 2px;
+      font-size: 0.85rem;
+      border: 1px solid #999;
+      border-radius: 2px;
+      text-align: right; 
+    }
+
+    h3 { margin: 5px 0; font-size: 1.2rem; }
+
+    .button-container {
+      display: flex;
+      align-items: center;
+      height: 100%;
+      padding-top: 30px;
+    }
+    
+    button { 
+      padding: 8px 16px; 
+      cursor: pointer; 
+      font-size: 0.85rem;
+      background-color: #f0f0f0;
+      border: 1px solid #999;
+      border-radius: 3px;
+    }
+    button:active { background-color: #ddd; }
+
+    #info-box {
+      width: 800px; margin: 5px auto 10px; padding: 10px;
+      border: 1px solid #888; background: #f9f9f9;
+      text-align: left; font-family: monospace; font-size: 0.9rem;
+    }
+    canvas { display: block; margin: 5px auto; border: 1px solid #ccc; }
+  </style>
+</head>
+
+<body>
+  <div id="controls">
+    <div class="control-group">
+      <strong>Gain</strong>
+      <div class="input-pair"><label>F1(x)</label><input type="number" id="k1" value="0.0" step="0.1" /></div>
+      <div class="input-pair"><label>F2(ẋ)</label><input type="number" id="k2" value="0.0" step="0.1" /></div>
+      <div class="input-pair"><label>F3(θ)</label><input type="number" id="k3" value="0.0" step="0.1" /></div>
+      <div class="input-pair"><label>F4(θ̇)</label><input type="number" id="k4" value="0.0" step="0.1" /></div>
+    </div>
+
+    <div class="button-container">
+      <button onclick="resetSystem()">リセット</button>
+    </div>
+  </div>
+
+  <div id="info-box"><pre id="info">Loading...</pre></div>
+
+  <script>
+    let x, x_dot, theta, theta_dot, u;
+    let lastSimTime = 0;
+
+    let xHistory = [];
+    let xDotHistory = [];
+    let thetaHistory = [];
+    let thetaDotHistory = [];
+    const MAX_HISTORY = 1000;
+
+    const g = 9.8;
+    const fps = 60;
+    const dt = 0.005;
+    const M = 1.0;
+    const m = 0.5;
+    const l = 1.0;
+    const damping_x = 0.3;
+    const damping_theta = 0.2;
+    const px2m = 1.0 / 100;
+
+    function setup() {
+      createCanvas(1000, 730);
+      frameRate(fps);
+      resetSystem();
+      textFont('monospace', 14);
+    }
+
+    function draw() {
+      background(255);
+      const now = millis() / 1000;
+      while (lastSimTime + dt <= now) {
+        simulate(dt);
+        lastSimTime += dt;
+      }
+      
+      drawGraphs();
+      drawCart();
+      updateInfo();
+    }
+
+    function wrapAngle(angle) {
+      return ((angle + Math.PI) % (2 * Math.PI)) - Math.PI;
+    }
+
+    function simulate(dt) {
+        const k1 = parseFloat(document.getElementById("k1").value);
+        const k2 = parseFloat(document.getElementById("k2").value);
+        const k3 = parseFloat(document.getElementById("k3").value);
+        const k4 = parseFloat(document.getElementById("k4").value);
+
+        const x_m = (x - width/2) * px2m; 
+        const x_dot_m = x_dot * px2m;
+
+        u = - (k1 * x_m + k2 * x_dot_m + k3 * theta + k4 * theta_dot);
+
+        const sinT = Math.sin(theta);
+        const cosT = Math.cos(theta);
+        const totalMass = M + m;
+
+        const theta_ddot = (
+            g * sinT - cosT * (u + m * l * theta_dot ** 2 * sinT) / totalMass
+        ) / (l * (1 - m * cosT * cosT / totalMass)) - damping_theta * theta_dot;
+
+        const x_ddot = (
+            u + m * l * (theta_dot ** 2 * sinT - theta_ddot * cosT)
+        ) / totalMass - damping_x * x_dot;
+
+        x_dot += x_ddot * dt;
+        x += x_dot * dt;
+
+        theta_dot += theta_ddot * dt;
+        theta += theta_dot * dt;
+
+        x = constrain(x, 50, width - 50);
+
+        xHistory.push(x_m);
+        xDotHistory.push(x_dot_m);
+        thetaHistory.push(theta);
+        thetaDotHistory.push(theta_dot);
+
+        if (thetaHistory.length > MAX_HISTORY) {
+            xHistory.shift();
+            xDotHistory.shift();
+            thetaHistory.shift();
+            thetaDotHistory.shift();
+        }
+    }
+
+    function drawCart() {
+      const cartY = height - 150;
+      
+      stroke(200);
+      strokeWeight(1);
+      line(0, cartY + 35, width, cartY + 35);
+
+      fill(100, 180, 255);
+      stroke(0);
+      strokeWeight(1);
+      rectMode(CENTER);
+      rect(x, cartY, 100, 30, 10);
+      fill(0);
+      ellipse(x - 30, cartY + 25, 20, 20);
+      ellipse(x + 30, cartY + 25, 20, 20);
+
+      const l_px = l * 100;
+      const pendulumX = x - l_px * Math.sin(theta);
+      const pendulumY = cartY - l_px * Math.cos(theta);
+
+      stroke(0);
+      strokeWeight(6);
+      line(x, cartY, pendulumX, pendulumY);
+      fill(0);
+      ellipse(pendulumX, pendulumY, 20, 20);
+      
+      rectMode(CORNER); 
+    }
+
+    function resetSystem() {
+      x = width / 2;
+      x_dot = 0;
+      theta = 0.1;
+      theta_dot = 0;
+      lastSimTime = millis() / 1000;
+      
+      xHistory = [];
+      xDotHistory = [];
+      thetaHistory = [];
+      thetaDotHistory = [];
+    }
+
+    function updateInfo() {
+      const x_m = (x - width/2) * px2m;
+      const x_dot_m = x_dot * px2m;
+
+      document.getElementById("info").textContent =
+        `θ: ${theta.toFixed(3)} rad\n` +
+        `θ̇: ${theta_dot.toFixed(3)} rad/s\n` +
+        `x: ${x_m.toFixed(2)} m\n` +
+        `ẋ: ${x_dot_m.toFixed(2)} m/s\n` +
+        `u: ${u.toFixed(2)} N`;
+    }
+
+    // ★★★ グラフ描画関数（レイアウト調整＆範囲拡大） ★★★
+    function drawGraphs() {
+      // Y軸ラベル用のスペースを作るため、x座標をずらし、幅(w)を少し狭めました。
+      // 左側 (x=45, w=450), 右側 (x=545, w=450)
+      
+      // グラフ1: 角度 (θ)
+      // 範囲を ±2.0 rad に拡大
+      plotGraph(45, 10, 450, 100, thetaHistory, "Angle (theta) [rad]", -10.0, 10.0, true);
+      
+      // グラフ2: カート位置 (x)
+      // 範囲を ±4.0 m に拡大
+      plotGraph(545, 10, 450, 100, xHistory, "Cart Position (x) [m]", -10.0, 10.0, true);
+      
+      // グラフ3: 角速度 (θ_dot)
+      // 範囲を ±5.0 rad/s に拡大
+      plotGraph(45, 120, 450, 100, thetaDotHistory, "Angular Velocity (theta_dot) [rad/s]", -10.0, 10.0, true);
+      
+      // グラフ4: カート速度 (x_dot)
+      // 範囲を ±5.0 m/s に拡大
+      plotGraph(545, 120, 450, 100, xDotHistory, "Cart Velocity (x_dot) [m/s]", -10.0, 10.0, true);
+    }
+
+    /**
+     * 目盛り付きグラフ描画関数
+     */
+    function plotGraph(x, y, w, h, data, title, yMin, yMax, zeroLine) {
+      push(); 
+      translate(x, y); 
+
+      // グラフ背景
+      stroke(200);
+      fill(250);
+      rect(0, 0, w, h);
+
+      // --- 目盛り(グリッドと数値)の描画 ---
+      // 4分割（5本のライン）を描画します
+      const steps = 4;
+      textSize(10);
+      textAlign(RIGHT, CENTER);
+      
+      for (let i = 0; i <= steps; i++) {
+        // yMin ～ yMax の間の値を計算
+        let val = lerp(yMax, yMin, i / steps); 
+        // グラフ上のピクセルY座標
+        let yPos = map(val, yMin, yMax, h, 0);
+
+        // グリッド線
+        stroke(230); // 薄いグレー
+        strokeWeight(1);
+        if (i === 0 || i === steps) stroke(200); // 上下端は少し濃く
+        line(0, yPos, w, yPos);
+
+        // 数値ラベル（グラフの左側に描画）
+        fill(80);
+        noStroke();
+        // x座標 -5 の位置に数値を表示
+        text(val.toFixed(1), -5, yPos);
+      }
+
+      // --- タイトル ---
+      fill(0);
+      noStroke();
+      textAlign(LEFT, TOP);
+      textSize(12);
+      text(title, 5, 5);
+
+      // --- ゼロ線 ---
+      if (zeroLine) {
+        stroke(200, 100, 100, 150); 
+        strokeWeight(1);
+        const yZero = map(0, yMin, yMax, h, 0);
+        // 0が範囲内にある場合のみ描画
+        if (yZero >= 0 && yZero <= h) {
+            line(0, yZero, w, yZero);
+        }
+      }
+
+      // --- データのプロット ---
+      stroke(50, 50, 200); 
+      strokeWeight(1.5);
+      noFill();
+      beginShape();
+      for (let i = 0; i < data.length; i++) {
+        const xPixel = map(i, 0, MAX_HISTORY - 1, 0, w);
+        // 値を範囲内に制限（constrain）して、グラフの外に線が消えないようにする
+        const constrainedVal = constrain(data[i], yMin, yMax);
+        const yPixel = map(constrainedVal, yMin, yMax, h, 0);
+        
+        vertex(xPixel, yPixel);
+      }
+      endShape();
+
+      pop(); 
+    }
+
+  </script>
+</body>
+</html>

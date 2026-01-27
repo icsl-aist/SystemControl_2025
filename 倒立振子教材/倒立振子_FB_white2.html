@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>倒立振子（状態フィードバック - ノイズ修正版・目盛り付き）</title>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.6.0/lib/p5.min.js"></script>
+  <style>
+    body { font-family: sans-serif; text-align: center; margin: 0; padding-top: 5px; }
+    
+    #controls { 
+      margin: 5px auto; 
+      display: flex; 
+      justify-content: center; 
+      align-items: flex-start; 
+      flex-wrap: wrap; 
+      gap: 10px; 
+      max-width: 980px; 
+    }
+
+    .control-group { 
+      border: 1px solid #ccc; 
+      padding: 6px 10px; 
+      border-radius: 4px; 
+      display: flex; 
+      flex-direction: column; 
+      gap: 4px; 
+      background-color: #fff;
+      min-width: 110px; 
+    }
+
+    .control-group strong {
+      font-size: 0.85rem;
+      margin-bottom: 2px;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 2px;
+      text-align: center;
+      display: block;
+    }
+
+    .input-pair {
+      display: flex;
+      justify-content: space-between; 
+      align-items: center;
+      width: 100%;
+    }
+
+    .input-pair label { 
+      font-size: 0.8rem; 
+      margin-right: 5px; 
+      white-space: nowrap;
+    }
+
+    input { 
+      width: 50px; 
+      padding: 2px;
+      font-size: 0.85rem;
+      border: 1px solid #999;
+      border-radius: 2px;
+      text-align: right; 
+    }
+
+    h3 { margin: 5px 0; font-size: 1.2rem; }
+
+    .button-container {
+      display: flex;
+      align-items: center;
+      height: 100%;
+      padding-top: 30px; 
+    }
+    
+    button { 
+      padding: 8px 16px; 
+      cursor: pointer; 
+      font-size: 0.85rem;
+      background-color: #f0f0f0;
+      border: 1px solid #999;
+      border-radius: 3px;
+    }
+
+    #info-box {
+      width: 800px; margin: 5px auto 10px; padding: 10px;
+      border: 1px solid #888; background: #f9f9f9;
+      text-align: left; font-family: monospace; font-size: 0.9rem;
+    }
+    canvas { display: block; margin: 5px auto; border: 1px solid #ccc; }
+  </style>
+</head>
+
+<body>
+  
+  <div id="controls">
+    <div class="control-group">
+      <strong>Gain (F)</strong>
+      <div class="input-pair"><label>F1(x)</label><input type="number" id="k1" value="1.0" step="0.1" /></div>
+      <div class="input-pair"><label>F2(ẋ)</label><input type="number" id="k2" value="3.96" step="0.1" /></div>
+      <div class="input-pair"><label>F3(θ)</label><input type="number" id="k3" value="-38.8" step="0.1" /></div>
+      <div class="input-pair"><label>F4(θ̇)</label><input type="number" id="k4" value="-9.11" step="0.1" /></div>
+    </div>
+
+    <div class="control-group" style="background-color: #fff0f0;">
+      <strong>Noise (Std Dev)</strong>
+      <div class="input-pair"><label>Noise x</label><input type="number" id="noise_white1" value="0.0" step="0.01" /></div>
+      <div class="input-pair"><label>Noise θ</label><input type="number" id="noise_white2" value="0.0" step="0.01" /></div>
+    </div>
+
+    <div class="button-container">
+      <button onclick="resetSystem()">リセット</button>
+    </div>
+  </div>
+
+  <div id="info-box"><pre id="info">Loading...</pre></div>
+
+  <script>
+    let x, x_dot, theta, theta_dot, u;
+    
+    // 観測・推定関連
+    let x_observed = 0;
+    let x_dot_observed = 0;
+    let theta_observed = 0;
+    let theta_dot_observed = 0;
+
+    // ノイズ付き測定値
+    let x_meas = 0;
+    let theta_meas = 0;
+    let x_meas_prev = 0;
+    let theta_meas_prev = 0;
+
+    let noise_val_x = 0;
+    let noise_val_theta = 0;
+    
+    let lastSimTime = 0;
+
+    let xHistory = [];
+    let xDotHistory = [];
+    let thetaHistory = [];
+    let thetaDotHistory = [];
+    const MAX_HISTORY = 1000;
+
+    const g = 9.8;
+    const fps = 60;
+    const dt = 0.005;
+    const M = 1.0;
+    const m = 0.5;
+    const l = 1.0;
+    const damping_x = 0.3;
+    const damping_theta = 0.2;
+    const px2m = 1.0 / 100; 
+
+    function setup() {
+      createCanvas(1000, 730);
+      frameRate(fps);
+      resetSystem();
+      textFont('monospace', 14);
+    }
+
+    function draw() {
+      background(255);
+      const now = millis() / 1000;
+
+      while (lastSimTime + dt <= now) {
+        simulate(dt);
+        lastSimTime += dt;
+      }
+      
+      drawGraphs();
+      drawCart();
+      updateInfo();
+    }
+
+    function simulate(dt) {
+        const k1 = parseFloat(document.getElementById("k1").value);
+        const k2 = parseFloat(document.getElementById("k2").value);
+        const k3 = parseFloat(document.getElementById("k3").value);
+        const k4 = parseFloat(document.getElementById("k4").value);
+        
+        const current_noise_std_x = parseFloat(document.getElementById("noise_white1").value);
+        const current_noise_std_theta = parseFloat(document.getElementById("noise_white2").value);
+
+        const x_m = (x - width/2) * px2m;
+        const x_dot_m = x_dot * px2m;
+
+        // 1. ノイズ生成
+        noise_val_x = randomGaussian(0, current_noise_std_x);
+        noise_val_theta = randomGaussian(0, current_noise_std_theta);
+ 
+        // 2. ノイズ付きの測定値（メートル・ラジアン）
+        x_meas = x_m + noise_val_x;
+        theta_meas = theta + noise_val_theta;
+
+        // 3. ノイズ付き測定値からのオイラー差分（速度推定・グラフ用）
+        const x_dot_from_noisy = (x_meas - x_meas_prev) / dt;
+        const theta_dot_from_noisy = (theta_meas - theta_meas_prev) / dt;
+
+        // 観測値としてそのまま使用（LPFなし）
+        x_observed = x_meas;
+        theta_observed = theta_meas;
+        x_dot_observed = x_dot_from_noisy;
+        theta_dot_observed = theta_dot_from_noisy;
+
+        // 次ステップ用に測定値を保存
+        x_meas_prev = x_meas;
+        theta_meas_prev = theta_meas;
+
+        // 4. 状態フィードバック
+        u = - (k1 * x_observed + k2 * x_dot_observed + k3 * theta_observed + k4 * theta_dot_observed);
+
+        // 5. 物理シミュレーション（真の状態 x, x_dot, theta, theta_dot）
+        const sinT = Math.sin(theta);
+        const cosT = Math.cos(theta);
+        const totalMass = M + m;
+
+        const theta_ddot = (
+            g * sinT - cosT * (u + m * l * theta_dot ** 2 * sinT) / totalMass
+        ) / (l * (1 - m * cosT * cosT / totalMass)) - damping_theta * theta_dot;
+
+        const x_ddot = (
+            u + m * l * (theta_dot ** 2 * sinT - theta_ddot * cosT)
+        ) / totalMass - damping_x * x_dot;
+
+        x_dot += x_ddot * dt;
+        x += x_dot * dt;
+
+        theta_dot += theta_ddot * dt;
+        theta += theta_dot * dt;
+
+        x = constrain(x, 50, width - 50);
+
+        // ===== グラフ用履歴 =====
+        // xHistory: 「ノイズ付き x_meas」
+        // xDotHistory: 「ノイズ付き x_meas をオイラー差分した速度」
+        xHistory.push(x_meas);
+        xDotHistory.push(x_dot_from_noisy);
+
+        // theta 系は真値（必要ならここも noisy / diff に変えることも可能）
+        // ※元のコードの挙動に合わせて、ここは真値を保存しています
+        thetaHistory.push(theta_meas); 
+        thetaDotHistory.push(theta_dot_from_noisy);
+
+        if (thetaHistory.length > MAX_HISTORY) {
+            xHistory.shift();
+            xDotHistory.shift();
+            thetaHistory.shift();
+            thetaDotHistory.shift();
+        }
+    }
+
+    function drawCart() {
+      const cartY = height - 150;
+      
+      stroke(200);
+      strokeWeight(1);
+      line(0, cartY + 35, width, cartY + 35);
+
+      fill(100, 180, 255);
+      stroke(0);
+      strokeWeight(1); 
+      rectMode(CENTER);
+      rect(x, cartY, 100, 30, 10);
+      
+      fill(0);
+      ellipse(x - 30, cartY + 25, 20, 20);
+      ellipse(x + 30, cartY + 25, 20, 20);
+
+      const l_px = l * 100;
+      const pendulumX = x - l_px * Math.sin(theta);
+      const pendulumY = cartY - l_px * Math.cos(theta);
+
+      stroke(0);
+      strokeWeight(6);
+      line(x, cartY, pendulumX, pendulumY);
+      fill(0);
+      ellipse(pendulumX, pendulumY, 20, 20);
+      
+      rectMode(CORNER); 
+    }
+
+    function resetSystem() {
+      x = width / 2;
+      x_dot = 0;
+      theta = 0.1; 
+      theta_dot = 0;
+      lastSimTime = millis() / 1000;
+      
+      x_observed = 0;
+      theta_observed = 0.1;
+      x_dot_observed = 0;
+      theta_dot_observed = 0;
+
+      // 測定値の初期化
+      x_meas = 0;
+      theta_meas = 0.1;
+      x_meas_prev = 0;
+      theta_meas_prev = 0;
+
+      xHistory = [];
+      xDotHistory = [];
+      thetaHistory = [];
+      thetaDotHistory = [];
+    }
+
+    function updateInfo() {
+      const x_m = (x - width/2) * px2m;
+      const x_dot_m = x_dot * px2m;
+
+      document.getElementById("info").textContent =
+        `-- True State (System) --\n` +
+        `θ : ${theta.toFixed(3)} rad\n` +
+        `θ̇ : ${theta_dot.toFixed(3)} rad/s\n` +
+        `x : ${x_m.toFixed(2)} m\n` +
+        `ẋ : ${x_dot_m.toFixed(2)} m/s\n\n` +
+        `-- Observed (Used for Feedback) --\n` +
+        `x_obs : ${x_observed.toFixed(3)} m   (Noise: ${noise_val_x.toFixed(3)})\n` +
+        `θ_obs : ${theta_observed.toFixed(3)} rad (Noise: ${noise_val_theta.toFixed(3)})\n` +
+        `ẋ_obs : ${x_dot_observed.toFixed(3)} m/s (from noisy x)\n` +
+        `θ̇_obs : ${theta_dot_observed.toFixed(3)} rad/s (from noisy θ)\n\n` +
+        `-- Input --\n` +
+        `u : ${u.toFixed(2)} N`;
+    }
+
+    // ★★★ グラフ描画関数（更新版：目盛り・範囲拡大） ★★★
+    function drawGraphs() {
+      // 範囲を拡大して表示します
+      // グラフ位置は左(x=45)と右(x=545)に配置し、目盛り用のスペースを確保
+
+      // グラフ1: カート位置 (x_meas, Noisy)
+      plotGraph(45, 10, 450, 100, xHistory, "Cart Position (x_meas, noisy) [m]", -5.0, 5.0, true);
+
+      // グラフ2: 角度 (θ, True)
+      plotGraph(45, 120, 450, 100, thetaHistory, "Angle (theta) [rad]", -5.0, 5.0, true);
+      
+      // グラフ3: 角速度 (theta_dot, True)
+      plotGraph(545, 120, 450, 100, thetaDotHistory, "Angular Velocity (theta_dot) [rad/s]", -5.0, 5.0, true);
+      
+      // グラフ4: カート速度 (dx/dt, Noisy)
+      // ノイズの微分は値が跳ねやすいので、constrainで枠内に収めます
+      plotGraph(545, 10, 450, 100, xDotHistory, "Cart Velocity (x_dot dx/dt from noisy x) [m/s]", -5.0, 5.0, true);
+    }
+    
+    /**
+     * 目盛り付きグラフ描画関数
+     */
+    function plotGraph(x, y, w, h, data, title, yMin, yMax, zeroLine) {
+      push(); 
+      translate(x, y); 
+
+      // グラフ背景
+      stroke(200);
+      fill(250);
+      rect(0, 0, w, h);
+
+      // --- 目盛り(グリッドと数値) ---
+      const steps = 4;
+      textSize(10);
+      textAlign(RIGHT, CENTER);
+      
+      for (let i = 0; i <= steps; i++) {
+        let val = lerp(yMax, yMin, i / steps); 
+        let yPos = map(val, yMin, yMax, h, 0);
+
+        // グリッド線
+        stroke(230); 
+        strokeWeight(1);
+        if (i === 0 || i === steps) stroke(200); 
+        line(0, yPos, w, yPos);
+
+        // 数値ラベル
+        fill(80);
+        noStroke();
+        text(val.toFixed(1), -5, yPos);
+      }
+
+      // --- タイトル ---
+      fill(0);
+      noStroke();
+      textAlign(LEFT, TOP);
+      textSize(12);
+      text(title, 5, 5);
+
+      // --- ゼロ線 ---
+      if (zeroLine) {
+        stroke(200, 100, 100, 150); 
+        strokeWeight(1);
+        const yZero = map(0, yMin, yMax, h, 0);
+        if (yZero >= 0 && yZero <= h) {
+            line(0, yZero, w, yZero);
+        }
+      }
+
+      // --- データのプロット ---
+      stroke(50, 50, 200); 
+      strokeWeight(1.5);
+      noFill();
+      beginShape();
+      for (let i = 0; i < data.length; i++) {
+        const xPixel = map(i, 0, MAX_HISTORY - 1, 0, w);
+        // ノイズで値が飛んでも描画が消えないよう、範囲内に制限(constrain)
+        const constrainedVal = constrain(data[i], yMin, yMax);
+        const yPixel = map(constrainedVal, yMin, yMax, h, 0);
+        
+        vertex(xPixel, yPixel);
+      }
+      endShape();
+
+      pop(); 
+    }
+  </script>
+</body>
+</html>
